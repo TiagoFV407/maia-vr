@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>Barreira MAIA em VR</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@600;800&family=DM+Sans:wght@400;600&display=swap">
+<style>
+  /* Layout: cena 3D em tela cheia; painel de controle flutuante no canto (visual único, escuro). */
+  :root {
+    --bg: #0b1724;
+    --panel: rgba(9, 24, 40, 0.86);
+    --line: rgba(143, 176, 201, 0.28);
+    --fg: #eef4f8;
+    --muted: #9fb6c9;
+    --accent: #2fb8c9;
+    --display: "Manrope", "Segoe UI", system-ui, sans-serif;
+    --body: "DM Sans", "Segoe UI", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--body); overflow: hidden; }
+  #scene { position: fixed; inset: 0; }
+  #scene canvas { display: block; width: 100%; height: 100%; }
+  .hud {
+    position: fixed;
+    left: max(16px, env(safe-area-inset-left, 0px));
+    top: calc(16px + env(safe-area-inset-top, 0px));
+    width: min(360px, calc(100% - 32px));
+    display: grid; gap: 12px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+    backdrop-filter: blur(8px);
+  }
+  .eyebrow { font: 600 10px/1 var(--body); letter-spacing: .14em; text-transform: uppercase; color: var(--accent); }
+  h1 { margin: 0; font: 800 20px/1.15 var(--display); letter-spacing: -.01em; text-wrap: balance; }
+  .lead { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  button {
+    font: 600 12px/1 var(--body); color: var(--fg); cursor: pointer;
+    padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.04);
+  }
+  button:hover { background: rgba(255,255,255,.1); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .primary { background: var(--accent); border-color: var(--accent); color: #062029; }
+  .primary:hover { background: #4ccbda; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; }
+  .chip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .note { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+  .hud[data-collapsed="true"] .collapsible { display: none; }
+  @media (max-width: 520px) { .hud { gap: 10px; padding: 12px; } h1 { font-size: 17px; } }
+</style>
+
+<div id="scene" aria-label="Cena 3D de uma barreira sanitária com totem, câmera e catraca"></div>
+
+<section class="hud" id="hud" data-collapsed="false">
+  <div class="eyebrow">MAIA · Simulação imersiva</div>
+  <h1>Barreira sanitária na entrada da produção</h1>
+  <p class="lead collapsible">Um visitante sem cadastro e o Tiago, primeiro sem jaleco e depois com jaleco, passam pelo totem. Arraste para girar a cena, role para aproximar.</p>
+  <div class="row collapsible" role="group" aria-label="Ir para um estado">
+    <button class="chip" id="go-waiting" type="button"><i style="background:#f4b400"></i>Aguardando</button>
+    <button class="chip" id="go-unidentified" type="button"><i style="background:#e0661f"></i>Não identificado</button>
+    <button class="chip" id="go-blocked" type="button"><i style="background:#c62f25"></i>Bloqueado</button>
+    <button class="chip" id="go-released" type="button"><i style="background:#13915f"></i>Liberado</button>
+  </div>
+  <div class="row">
+    <button class="primary" id="enter-vr" type="button" disabled>Verificando VR…</button>
+    <button id="pause" type="button">Pausar</button>
+    <button id="collapse" type="button" aria-expanded="true">Recolher</button>
+  </div>
+  <p class="note collapsible" id="vr-note">No óculos, o gatilho do controle pausa e continua a cena.</p>
+</section>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+// ---------- estados (mesmas cores da tela do site) ----------
+const STATES = {
+  waiting:      { color: "#f4b400", ink: "#3d2a00", title: "Aguardando colaborador" },
+  unidentified: { color: "#e0661f", ink: "#ffffff", title: "Colaborador não identificado" },
+  analyzing:    { color: "#0a3663", ink: "#ffffff", title: "Analisando…" },
+  blocked:      { color: "#c62f25", ink: "#ffffff", title: "Bloqueado · sem EPI" },
+  released:     { color: "#13915f", ink: "#ffffff", title: "Liberado · BPF conforme" },
+};
+
+// Roteiro em segundos (repete a cada LOOP).
+const LOOP = 44;
+const TIMELINE = [
+  [0,    "waiting",      null,      "1 · Ninguém na frente da câmera. Nada é enviado ao Roboflow."],
+  [5,    "waiting",      null,      "2 · Um visitante sem cadastro se aproxima do totem."],
+  [9,    "unidentified", "Rosto sem cadastro", "2 · Rosto sem cadastro: catraca travada, sem gastar crédito."],
+  [13,   "waiting",      null,      "O visitante sai. A barreira aguarda o próximo."],
+  [17,   "waiting",      null,      "3 · Tiago, colaborador cadastrado, chega sem jaleco."],
+  [21,   "analyzing",    "Tiago · consultando EPIs", "Rosto reconhecido (distância 0,32). Consultando o Roboflow."],
+  [22.5, "blocked",      "Tiago · Falta: Jaleco/avental", "3 · Identificado, mas falta EPI obrigatório: Jaleco/avental."],
+  [27.5, "waiting",      null,      "4 · Tiago veste o jaleco no cabideiro."],
+  [32,   "analyzing",    "Tiago · consultando EPIs", "Nova análise: rosto e EPIs."],
+  [33.5, "released",     "Tiago · Jaleco detectado", "4 · Identidade e EPIs conferidos: pulso enviado à catraca."],
+  [39,   "waiting",      null,      "Pronto para o próximo colaborador."],
+];
+const JUMPS = { waiting: 0.5, unidentified: 10, blocked: 23.5, released: 34 };
+
+function segmentAt(t) {
+  let seg = TIMELINE[0];
+  for (const item of TIMELINE) if (t >= item[0]) seg = item;
+  return seg;
+}
+
+// Interpolação linear entre pontos [tempo, x, z].
+function pathAt(points, t) {
+  if (t <= points[0][0]) return [points[0][1], points[0][2]];
+  for (let i = 1; i < points.length; i++) {
+    const [t1, x1, z1] = points[i];
+    const [t0, x0, z0] = points[i - 1];
+    if (t <= t1) {
+      const k = (t - t0) / (t1 - t0);
+      const s = k * k * (3 - 2 * k);
+      return [x0 + (x1 - x0) * s, z0 + (z1 - z0) * s];
+    }
+  }
+  const last = points[points.length - 1];
+  return [last[1], last[2]];
+}
+
+const VISITOR_PATH = [[5, 0.3, 7.5], [9, 0, 1.25], [13, 0, 1.25], [17, -0.3, 7.5]];
+const TIAGO_PATH = [[17, 0.3, 7.5], [21, 0, 1.25], [27.5, 0, 1.25], [29.5, 2.15, 1.0], [30.5, 2.15, 1.0], [32, 0, 1.25], [34.2, 0, 1.25], [39, 0, -5.5]];
+
+// ---------- renderizador ----------
+const host = document.getElementById("scene");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(host.clientWidth, host.clientHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType("local-floor");
+host.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#dfe7ec");
+scene.fog = new THREE.Fog("#dfe7ec", 14, 30);
+
+const camera = new THREE.PerspectiveCamera(55, host.clientWidth / host.clientHeight, 0.05, 60);
+// O "dolly" carrega a câmera; no VR o óculos se move dentro dele.
+const dolly = new THREE.Group();
+dolly.add(camera);
+scene.add(dolly);
+camera.position.set(2.5, 2.0, 4.9);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.1, 0.6);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.minDistance = 2;
+controls.maxDistance = 7;
+controls.update();
+
+scene.add(new THREE.HemisphereLight("#ffffff", "#9aa8b2", 1.6));
+const sun = new THREE.DirectionalLight("#ffffff", 1.4);
+sun.position.set(3, 6, 4);
+scene.add(sun);
+
+// ---------- materiais ----------
+const M = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.75, metalness: 0, ...extra });
+const mat = {
+  floorDirty: M("#c9d3d6", { roughness: 0.55 }),
+  floorClean: M("#bfe0d6", { roughness: 0.5 }),
+  wall: M("#f4f7f8", { roughness: 0.9 }),
+  seam: M("#d6dee2"),
+  steel: M("#b9c4cb", { metalness: 0.65, roughness: 0.32 }),
+  dark: M("#1f2b36", { roughness: 0.5 }),
+  glass: new THREE.MeshStandardMaterial({ color: "#bfe3ee", transparent: true, opacity: 0.28, roughness: 0.1 }),
+  yellow: M("#f2c400"),
+  black: M("#1a1d21"),
+  lamp: new THREE.MeshStandardMaterial({ color: "#ffffff", emissive: "#ffffff", emissiveIntensity: 1 }),
+};
+
+function box(w, h, d, material, x, y, z, parent = scene) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  mesh.position.set(x, y, z);
+  parent.add(mesh);
+  return mesh;
+}
+
+// ---------- texto em textura ----------
+function textPanel(width, height, pxPerMeter = 512) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * pxPerMeter);
+  canvas.height = Math.round(height * pxPerMeter);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(width, height),
+    new THREE.MeshBasicMaterial({ map: texture, toneMapped: false }),
+  );
+  return { canvas, ctx: canvas.getContext("2d"), texture, mesh };
+}
+
+function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+  const words = text.split(" ");
+  let line = "";
+  for (const word of words) {
+    const test = line ? `${line} ${word}` : word;
+    if (ctx.measureText(test).width > maxWidth && line) {
+      ctx.fillText(line, x, y);
+      line = word;
+      y += lineHeight;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, x, y);
+}
+
+// ---------- sala ----------
+const ROOM = { x: 3.2, zBack: -7, zFront: 8, h: 3.2 };
+const floorDirty = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.x * 2, ROOM.zFront), mat.floorDirty);
+floorDirty.rotation.x = -Math.PI / 2;
+floorDirty.position.set(0, 0, ROOM.zFront / 2);
+scene.add(floorDirty);
+const floorClean = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.x * 2, -ROOM.zBack), mat.floorClean);
+floorClean.rotation.x = -Math.PI / 2;
+floorClean.position.set(0, 0, ROOM.zBack / 2);
+scene.add(floorClean);
+
+// paredes laterais com juntas de painel sanduíche
+for (const side of [-1, 1]) {
+  box(0.1, ROOM.h, ROOM.zFront - ROOM.zBack, mat.wall, side * ROOM.x, ROOM.h / 2, (ROOM.zFront + ROOM.zBack) / 2);
+  for (let z = ROOM.zBack + 1.2; z < ROOM.zFront; z += 1.2) {
+    box(0.02, ROOM.h, 0.02, mat.seam, side * (ROOM.x - 0.06), ROOM.h / 2, z);
+  }
+}
+box(ROOM.x * 2, ROOM.h, 0.1, mat.wall, 0, ROOM.h / 2, ROOM.zBack);
+box(ROOM.x * 2, 0.1, ROOM.zFront - ROOM.zBack, mat.wall, 0, ROOM.h, (ROOM.zFront + ROOM.zBack) / 2);
+for (let z = ROOM.zBack + 1.5; z < ROOM.zFront; z += 3) box(0.5, 0.04, 1.4, mat.lamp, 0, ROOM.h - 0.06, z);
+
+// divisória com vidro dos dois lados da passagem
+box(ROOM.x - 0.95, 1.1, 0.06, mat.glass, -(0.95 + (ROOM.x - 0.95) / 2), 0.55, 0);
+box(ROOM.x - 0.95, 1.1, 0.06, mat.glass, 0.95 + (ROOM.x - 0.95) / 2, 0.55, 0);
+box(ROOM.x - 0.95, 0.05, 0.08, mat.steel, -(0.95 + (ROOM.x - 0.95) / 2), 1.12, 0);
+box(ROOM.x - 0.95, 0.05, 0.08, mat.steel, 0.95 + (ROOM.x - 0.95) / 2, 1.12, 0);
+
+// faixas amarelas da baia de espera
+for (const x of [-0.55, 0.55]) box(0.06, 0.005, 1.6, mat.yellow, x, 0.003, 1.3);
+
+// ponto de parada: anel no chão que muda de cor
+const ring = new THREE.Mesh(
+  new THREE.RingGeometry(0.28, 0.36, 48),
+  new THREE.MeshBasicMaterial({ color: STATES.waiting.color, toneMapped: false }),
+);
+ring.rotation.x = -Math.PI / 2;
+ring.position.set(0, 0.006, 1.25);
+scene.add(ring);
+
+// faixa de luz no chão sob a catraca
+const strip = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.1, 0.08),
+  new THREE.MeshBasicMaterial({ color: STATES.waiting.color, toneMapped: false }),
+);
+strip.rotation.x = -Math.PI / 2;
+strip.position.set(0, 0.006, 0.18);
+scene.add(strip);
+
+// ---------- totem com câmera e tela ----------
+const totem = new THREE.Group();
+totem.position.set(-0.78, 0, 0.35);
+scene.add(totem);
+box(0.34, 1.5, 0.26, mat.steel, 0, 0.75, 0, totem);
+box(0.36, 0.06, 0.28, mat.dark, 0, 1.53, 0, totem);
+const cam = box(0.14, 0.08, 0.1, mat.black, 0, 1.64, 0.04, totem);
+const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.02, 24), mat.dark);
+lens.rotation.x = Math.PI / 2;
+lens.position.set(0, 0, 0.055);
+cam.add(lens);
+const camLed = new THREE.Mesh(new THREE.SphereGeometry(0.008, 12, 8), new THREE.MeshBasicMaterial({ color: "#ff3b30" }));
+camLed.position.set(0.045, 0.02, 0.052);
+cam.add(camLed);
+const screenPanel = textPanel(0.3, 0.22, 1400);
+screenPanel.mesh.position.set(0, 1.28, 0.132);
+screenPanel.mesh.rotation.y = 0.25;
+totem.add(screenPanel.mesh);
+
+// ---------- catraca (gabinete + braço) ----------
+const gate = new THREE.Group();
+gate.position.set(0.62, 0, 0);
+scene.add(gate);
+box(0.28, 1.0, 0.7, mat.steel, 0, 0.5, 0, gate);
+box(0.3, 0.04, 0.72, mat.dark, 0, 1.02, 0, gate);
+const gateLight = new THREE.Mesh(
+  new THREE.BoxGeometry(0.02, 0.12, 0.5),
+  new THREE.MeshBasicMaterial({ color: STATES.waiting.color, toneMapped: false }),
+);
+gateLight.position.set(-0.145, 0.85, 0);
+gate.add(gateLight);
+const armPivot = new THREE.Group();
+armPivot.position.set(-0.14, 0.9, 0);
+gate.add(armPivot);
+const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.95, 16), mat.steel);
+arm.rotation.z = Math.PI / 2;
+arm.position.set(-0.475, 0, 0);
+armPivot.add(arm);
+
+// ---------- placas ----------
+const header = box(2.6, 0.08, 0.1, mat.dark, 0, 2.42, 0);
+const board = textPanel(2.4, 0.62, 640);
+board.mesh.position.set(0, 2.1, 0.06);
+scene.add(board.mesh);
+
+const backSign = textPanel(2.6, 0.5, 400);
+backSign.mesh.position.set(0, 2.2, ROOM.zBack + 0.06);
+scene.add(backSign.mesh);
+{
+  const { ctx, canvas, texture } = backSign;
+  ctx.fillStyle = "#0f6a4b"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#ffffff"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = `800 ${canvas.height * 0.36}px Manrope, sans-serif`;
+  ctx.fillText("ÁREA LIMPA · PRODUÇÃO", canvas.width / 2, canvas.height / 2);
+  texture.needsUpdate = true;
+}
+
+const sideSign = textPanel(1.4, 0.7, 400);
+sideSign.mesh.position.set(-ROOM.x + 0.06, 1.7, 3.2);
+sideSign.mesh.rotation.y = Math.PI / 2;
+scene.add(sideSign.mesh);
+
+// pia de pedal e cabideiro de jalecos (lado de fora)
+box(0.55, 0.85, 0.45, mat.steel, -ROOM.x + 0.35, 0.425, 2.2);
+box(0.5, 0.05, 0.4, mat.dark, -ROOM.x + 0.35, 0.86, 2.2);
+const rack = new THREE.Group();
+rack.position.set(2.65, 0, 0.75);
+scene.add(rack);
+const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.8, 12), mat.steel);
+pole.position.y = 0.9;
+rack.add(pole);
+const rackBase = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.03, 24), mat.steel);
+rackBase.position.y = 0.015;
+rack.add(rackBase);
+const hangingCoat = box(0.42, 0.85, 0.12, M("#ffffff"), -0.12, 1.2, 0, rack);
+
+// ---------- pessoas (low poly) ----------
+function person({ shirt, pants, skin, hair }) {
+  const root = new THREE.Group();
+  const body = new THREE.Group();
+  root.add(body);
+  const legL = new THREE.Group(); legL.position.set(-0.09, 0.9, 0); body.add(legL);
+  const legR = new THREE.Group(); legR.position.set(0.09, 0.9, 0); body.add(legR);
+  box(0.13, 0.88, 0.15, M(pants), 0, -0.44, 0, legL);
+  box(0.13, 0.88, 0.15, M(pants), 0, -0.44, 0, legR);
+  box(0.15, 0.06, 0.24, mat.dark, 0, -0.87, 0.04, legL);
+  box(0.15, 0.06, 0.24, mat.dark, 0, -0.87, 0.04, legR);
+  box(0.4, 0.58, 0.22, M(shirt), 0, 1.2, 0, body);
+  const armL = new THREE.Group(); armL.position.set(-0.25, 1.46, 0); body.add(armL);
+  const armR = new THREE.Group(); armR.position.set(0.25, 1.46, 0); body.add(armR);
+  box(0.1, 0.56, 0.11, M(shirt), 0, -0.28, 0, armL);
+  box(0.1, 0.56, 0.11, M(shirt), 0, -0.28, 0, armR);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.13, 24, 16), M(skin));
+  head.position.set(0, 1.66, 0);
+  body.add(head);
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.135, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), M(hair));
+  cap.position.set(0, 1.68, -0.01);
+  body.add(cap);
+  // jaleco: corpo longo + mangas, escondido até ser vestido
+  const coat = new THREE.Group();
+  body.add(coat);
+  box(0.44, 0.92, 0.26, M("#ffffff", { roughness: 0.9 }), 0, 1.04, 0, coat);
+  box(0.02, 0.86, 0.005, M("#d9e1e6"), 0, 1.06, 0.131, coat);
+  const sleeveL = box(0.12, 0.5, 0.13, M("#ffffff"), 0, -0.25, 0, armL);
+  const sleeveR = box(0.12, 0.5, 0.13, M("#ffffff"), 0, -0.25, 0, armR);
+  coat.userData.sleeves = [sleeveL, sleeveR];
+  root.userData = { legL, legR, armL, armR, coat };
+  scene.add(root);
+  return root;
+}
+
+function setCoat(p, on) {
+  p.userData.coat.visible = on;
+  p.userData.coat.userData.sleeves.forEach((s) => (s.visible = on));
+}
+
+const visitor = person({ shirt: "#6d7f8f", pants: "#2d3742", skin: "#c99a7a", hair: "#3a2a20" });
+const tiago = person({ shirt: "#2d6fa8", pants: "#23303d", skin: "#d8a888", hair: "#2a1d14" });
+setCoat(visitor, false);
+
+const lastPos = new Map();
+function placePerson(p, points, t, visible, dt) {
+  p.visible = visible;
+  if (!visible) { lastPos.delete(p); return; }
+  const [x, z] = pathAt(points, t);
+  const prev = lastPos.get(p) || [x, z];
+  const dx = x - prev[0], dz = z - prev[1];
+  const speed = Math.hypot(dx, dz) / Math.max(dt, 1e-3);
+  p.position.set(x, 0, z);
+  if (speed > 0.05) p.rotation.y = Math.atan2(dx, dz);
+  else p.rotation.y += wrapAngle(Math.PI - p.rotation.y) * Math.min(1, dt * 4); // parado: de frente para o totem
+  const swing = speed > 0.05 ? Math.sin(t * 9) * 0.45 : 0;
+  const { legL, legR, armL, armR } = p.userData;
+  legL.rotation.x = swing; legR.rotation.x = -swing;
+  armL.rotation.x = -swing * 0.7; armR.rotation.x = swing * 0.7;
+  lastPos.set(p, [x, z]);
+}
+function wrapAngle(a) { return Math.atan2(Math.sin(a), Math.cos(a)); }
+
+// ---------- desenho das telas ----------
+let lastKey = "";
+function drawBoard(stateKey, detail, narration) {
+  const s = STATES[stateKey];
+  {
+    const { ctx, canvas, texture } = board;
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = s.color; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(0,0,0,0.12)"; ctx.fillRect(0, H * 0.7, W, H * 0.3);
+    ctx.fillStyle = s.ink; ctx.textBaseline = "alphabetic"; ctx.textAlign = "left";
+    ctx.font = `600 ${H * 0.085}px "DM Sans", sans-serif`;
+    ctx.globalAlpha = 0.85; ctx.fillText("MAIA · BARREIRA SANITÁRIA", W * 0.03, H * 0.15); ctx.globalAlpha = 1;
+    ctx.font = `800 ${H * 0.22}px Manrope, sans-serif`;
+    ctx.fillText(s.title, W * 0.03, H * 0.4);
+    ctx.font = `600 ${H * 0.11}px "DM Sans", sans-serif`;
+    if (detail) ctx.fillText(detail, W * 0.03, H * 0.58);
+    ctx.fillStyle = stateKey === "waiting" ? "#3d2a00" : "#ffffff";
+    ctx.font = `400 ${H * 0.095}px "DM Sans", sans-serif`;
+    wrapText(ctx, narration, W * 0.03, H * 0.87, W * 0.94, H * 0.11);
+    texture.needsUpdate = true;
+  }
+  {
+    const { ctx, canvas, texture } = screenPanel;
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = "#0d2236"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = s.color; ctx.fillRect(0, 0, W, H * 0.42);
+    ctx.fillStyle = s.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = `800 ${H * 0.13}px Manrope, sans-serif`;
+    wrapText(ctx, s.title, W / 2, H * 0.15, W * 0.9, H * 0.14);
+    ctx.fillStyle = "#eef4f8";
+    ctx.font = `600 ${H * 0.1}px "DM Sans", sans-serif`;
+    wrapText(ctx, detail || "Olhe para a câmera", W / 2, H * 0.62, W * 0.88, H * 0.12);
+    texture.needsUpdate = true;
+  }
+}
+
+function drawSideSign() {
+  const { ctx, canvas, texture } = sideSign;
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = "#0a3663"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#ffffff"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.font = `800 ${H * 0.13}px Manrope, sans-serif`;
+  ctx.fillText("Antes de entrar", W * 0.07, H * 0.22);
+  ctx.font = `400 ${H * 0.085}px "DM Sans", sans-serif`;
+  ["1. Lave e higienize as mãos", "2. Vista os EPIs do seu cargo", "3. Pare no círculo e olhe", "    para a câmera"].forEach((line, i) =>
+    ctx.fillText(line, W * 0.07, H * (0.42 + i * 0.14)));
+  texture.needsUpdate = true;
+}
+
+// ---------- tempo e controles ----------
+let t = 0;
+let paused = false;
+const pauseBtn = document.getElementById("pause");
+function setPaused(value) {
+  paused = value;
+  pauseBtn.textContent = paused ? "Continuar" : "Pausar";
+}
+pauseBtn.addEventListener("click", () => setPaused(!paused));
+for (const [key, at] of Object.entries(JUMPS)) {
+  document.getElementById(`go-${key}`).addEventListener("click", () => { t = at; lastPos.clear(); });
+}
+const hud = document.getElementById("hud");
+const collapseBtn = document.getElementById("collapse");
+collapseBtn.addEventListener("click", () => {
+  const collapsed = hud.dataset.collapsed !== "true";
+  hud.dataset.collapsed = String(collapsed);
+  collapseBtn.textContent = collapsed ? "Expandir" : "Recolher";
+  collapseBtn.setAttribute("aria-expanded", String(!collapsed));
+});
+
+// ---------- VR ----------
+const vrBtn = document.getElementById("enter-vr");
+const vrNote = document.getElementById("vr-note");
+let xrSession = null;
+async function setupVR() {
+  let supported = false;
+  try { supported = !!(await navigator.xr?.isSessionSupported("immersive-vr")); } catch { supported = false; }
+  if (!supported) {
+    vrBtn.textContent = "VR indisponível aqui";
+    vrNote.textContent = window.isSecureContext
+      ? "Este navegador ou esta página não liberou o modo VR. Abra a página no navegador do óculos por um endereço https próprio."
+      : "O modo VR exige https ou localhost.";
+    return;
+  }
+  vrBtn.disabled = false;
+  vrBtn.textContent = "Entrar em VR";
+  vrBtn.addEventListener("click", async () => {
+    if (xrSession) { xrSession.end(); return; }
+    try {
+      const session = await navigator.xr.requestSession("immersive-vr", { optionalFeatures: ["local-floor"] });
+      xrSession = session;
+      session.addEventListener("end", onEndVR);
+      await renderer.xr.setSession(session);
+      onStartVR();
+    } catch {
+      vrNote.textContent = "O óculos recusou o modo VR. Confira a permissão do navegador e tente de novo.";
+    }
+  });
+}
+function onStartVR() {
+  vrBtn.textContent = "Sair do VR";
+  controls.enabled = false;
+  // Ponto de vista: de lado, olhando para a catraca.
+  dolly.position.set(2.5, 0, 2.6);
+  dolly.rotation.y = Math.atan2(2.5, 2.3);
+  camera.position.set(0, 0, 0);
+}
+function onEndVR() {
+  xrSession = null;
+  vrBtn.textContent = "Entrar em VR";
+  dolly.position.set(0, 0, 0);
+  dolly.rotation.y = 0;
+  camera.position.set(2.5, 2.0, 4.9);
+  controls.enabled = true;
+  controls.update();
+}
+for (const i of [0, 1]) {
+  const controller = renderer.xr.getController(i);
+  controller.addEventListener("select", () => setPaused(!paused));
+  dolly.add(controller);
+}
+setupVR();
+
+// ---------- laço ----------
+const clock = new THREE.Clock();
+let gateAngle = 0;
+function frame() {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (!paused) t = (t + dt) % LOOP;
+
+  const [, stateKey, detail, narration] = segmentAt(t);
+  const key = `${stateKey}|${detail}|${narration}`;
+  if (key !== lastKey) {
+    lastKey = key;
+    drawBoard(stateKey, detail, narration);
+    const c = new THREE.Color(STATES[stateKey].color);
+    ring.material.color.copy(c);
+    strip.material.color.copy(c);
+    gateLight.material.color.copy(c);
+  }
+
+  placePerson(visitor, VISITOR_PATH, t, t >= 5 && t < 17, dt);
+  placePerson(tiago, TIAGO_PATH, t, t >= 17 && t < 40, dt);
+  const coatOn = t >= 29.8;
+  setCoat(tiago, coatOn);
+  hangingCoat.visible = !coatOn || t >= 40;
+
+  const open = t >= 33.8 && t < 39.5;
+  gateAngle += ((open ? -Math.PI / 2 : 0) - gateAngle) * Math.min(1, dt * 4);
+  armPivot.rotation.y = gateAngle;
+  camLed.visible = Math.floor(t * 2) % 2 === 0;
+
+  if (!renderer.xr.isPresenting) controls.update();
+  renderer.render(scene, camera);
+}
+renderer.setAnimationLoop(frame);
+
+function resize() {
+  camera.aspect = host.clientWidth / host.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(host.clientWidth, host.clientHeight);
+}
+window.addEventListener("resize", resize);
+
+drawSideSign();
+document.fonts?.ready.then(() => { lastKey = ""; drawSideSign(); }).catch(() => {});
+</script>
+
+</body>
+</html>
