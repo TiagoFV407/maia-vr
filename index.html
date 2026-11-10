@@ -56,6 +56,8 @@
   .chip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .note { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
   .hud[data-collapsed="true"] .collapsible { display: none; }
+  .mode-link { display: block; padding: 11px 12px; border-radius: 8px; background: #13915f; color: #fff; font: 700 13px/1.2 var(--body); text-align: center; text-decoration: none; }
+  .mode-link:hover { background: #17a86e; }
   @media (max-width: 520px) { .hud { gap: 10px; padding: 12px; } h1 { font-size: 17px; } }
 </style>
 
@@ -64,13 +66,14 @@
 <section class="hud" id="hud" data-collapsed="false">
   <div class="eyebrow">MAIA · Simulação imersiva</div>
   <h1>Barreira sanitária na entrada da produção</h1>
-  <p class="lead collapsible">Um visitante sem cadastro e o Tiago, primeiro sem jaleco e depois com jaleco, passam pelo totem. Arraste para girar a cena, role para aproximar.</p>
+  <p class="lead collapsible">Um visitante sem cadastro e a Nicolly, primeiro sem jaleco e depois com jaleco, passam pelo totem. Arraste para girar a cena, role para aproximar.</p>
   <div class="row collapsible" role="group" aria-label="Ir para um estado">
     <button class="chip" id="go-waiting" type="button"><i style="background:#f4b400"></i>Aguardando</button>
     <button class="chip" id="go-unidentified" type="button"><i style="background:#e0661f"></i>Não identificado</button>
     <button class="chip" id="go-blocked" type="button"><i style="background:#c62f25"></i>Bloqueado</button>
     <button class="chip" id="go-released" type="button"><i style="background:#13915f"></i>Liberado</button>
   </div>
+  <a class="mode-link" href="colaborador.html">Ser a colaboradora (modo interativo) →</a>
   <div class="row">
     <button class="primary" id="enter-vr" type="button" disabled>Verificando VR…</button>
     <button id="pause" type="button">Pausar</button>
@@ -89,6 +92,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
+// Nome exibido na animação: troque aqui para mudar em toda a cena.
+const NOME = "Nicolly";
+
 // ---------- estados (mesmas cores da tela do site) ----------
 const STATES = {
   waiting:      { color: "#f4b400", ink: "#3d2a00", title: "Aguardando colaborador" },
@@ -105,12 +111,12 @@ const TIMELINE = [
   [5,    "waiting",      null,      "2 · Um visitante sem cadastro se aproxima do totem."],
   [9,    "unidentified", "Rosto sem cadastro", "2 · Rosto sem cadastro: catraca travada, sem gastar crédito."],
   [13,   "waiting",      null,      "O visitante sai. A barreira aguarda o próximo."],
-  [17,   "waiting",      null,      "3 · Tiago, colaborador cadastrado, chega sem jaleco."],
-  [21,   "analyzing",    "Tiago · consultando EPIs", "Rosto reconhecido (distância 0,32). Consultando o Roboflow."],
-  [22.5, "blocked",      "Tiago · Falta: Jaleco/avental", "3 · Identificado, mas falta EPI obrigatório: Jaleco/avental."],
-  [27.5, "waiting",      null,      "4 · Tiago veste o jaleco no cabideiro."],
-  [32,   "analyzing",    "Tiago · consultando EPIs", "Nova análise: rosto e EPIs."],
-  [33.5, "released",     "Tiago · Jaleco detectado", "4 · Identidade e EPIs conferidos: pulso enviado à catraca."],
+  [17,   "waiting",      null,      `3 · ${NOME}, colaboradora cadastrada, chega sem jaleco.`],
+  [21,   "analyzing",    `${NOME} · consultando EPIs`, "Rosto reconhecido (distância 0,32). Consultando o Roboflow."],
+  [22.5, "blocked",      `${NOME} · Falta: Jaleco/avental`, "3 · Identificado, mas falta EPI obrigatório: Jaleco/avental."],
+  [27.5, "waiting",      null,      `4 · ${NOME} veste o jaleco no cabideiro.`],
+  [32,   "analyzing",    `${NOME} · consultando EPIs`, "Nova análise: rosto e EPIs."],
+  [33.5, "released",     `${NOME} · Jaleco detectado`, "4 · Identidade e EPIs conferidos: pulso enviado à catraca."],
   [39,   "waiting",      null,      "Pronto para o próximo colaborador."],
 ];
 const JUMPS = { waiting: 0.5, unidentified: 10, blocked: 23.5, released: 34 };
@@ -138,7 +144,7 @@ function pathAt(points, t) {
 }
 
 const VISITOR_PATH = [[5, 0.3, 7.5], [9, 0, 1.25], [13, 0, 1.25], [17, -0.3, 7.5]];
-const TIAGO_PATH = [[17, 0.3, 7.5], [21, 0, 1.25], [27.5, 0, 1.25], [29.5, 2.15, 1.0], [30.5, 2.15, 1.0], [32, 0, 1.25], [34.2, 0, 1.25], [39, 0, -5.5]];
+const COLAB_PATH = [[17, 0.3, 7.5], [21, 0, 1.25], [27.5, 0, 1.25], [29.5, 2.15, 1.0], [30.5, 2.15, 1.0], [32, 0, 1.25], [34.2, 0, 1.25], [39, 0, -5.5]];
 
 // ---------- renderizador ----------
 const host = document.getElementById("scene");
@@ -353,7 +359,7 @@ rack.add(rackBase);
 const hangingCoat = box(0.42, 0.85, 0.12, M("#ffffff"), -0.12, 1.2, 0, rack);
 
 // ---------- pessoas (low poly) ----------
-function person({ shirt, pants, skin, hair }) {
+function person({ shirt, pants, skin, hair, ponytail = false }) {
   const root = new THREE.Group();
   const body = new THREE.Group();
   root.add(body);
@@ -374,6 +380,12 @@ function person({ shirt, pants, skin, hair }) {
   const cap = new THREE.Mesh(new THREE.SphereGeometry(0.135, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), M(hair));
   cap.position.set(0, 1.68, -0.01);
   body.add(cap);
+  if (ponytail) {
+    const tail = new THREE.Mesh(new THREE.SphereGeometry(0.065, 16, 12), M(hair));
+    tail.scale.set(1, 1.6, 1);
+    tail.position.set(0, 1.6, -0.15);
+    body.add(tail);
+  }
   // jaleco: corpo longo + mangas, escondido até ser vestido
   const coat = new THREE.Group();
   body.add(coat);
@@ -393,7 +405,7 @@ function setCoat(p, on) {
 }
 
 const visitor = person({ shirt: "#6d7f8f", pants: "#2d3742", skin: "#c99a7a", hair: "#3a2a20" });
-const tiago = person({ shirt: "#2d6fa8", pants: "#23303d", skin: "#d8a888", hair: "#2a1d14" });
+const colab = person({ shirt: "#2d6fa8", pants: "#23303d", skin: "#d8a888", hair: "#2a1d14", ponytail: true });
 setCoat(visitor, false);
 
 const lastPos = new Map();
@@ -557,9 +569,9 @@ function frame() {
   }
 
   placePerson(visitor, VISITOR_PATH, t, t >= 5 && t < 17, dt);
-  placePerson(tiago, TIAGO_PATH, t, t >= 17 && t < 40, dt);
+  placePerson(colab, COLAB_PATH, t, t >= 17 && t < 40, dt);
   const coatOn = t >= 29.8;
-  setCoat(tiago, coatOn);
+  setCoat(colab, coatOn);
   hangingCoat.visible = !coatOn || t >= 40;
 
   const open = t >= 33.8 && t < 39.5;

@@ -1,0 +1,745 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>MAIA VR · Colaboradora</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@600;800&family=DM+Sans:wght@400;600&display=swap">
+<style>
+  /* Layout: cena 3D em tela cheia; painel de controle flutuante no canto (visual único, escuro). */
+  :root {
+    --bg: #0b1724;
+    --panel: rgba(9, 24, 40, 0.86);
+    --line: rgba(143, 176, 201, 0.28);
+    --fg: #eef4f8;
+    --muted: #9fb6c9;
+    --accent: #2fb8c9;
+    --display: "Manrope", "Segoe UI", system-ui, sans-serif;
+    --body: "DM Sans", "Segoe UI", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--body); overflow: hidden; }
+  #scene { position: fixed; inset: 0; }
+  #scene canvas { display: block; width: 100%; height: 100%; }
+  .hud {
+    position: fixed;
+    left: max(16px, env(safe-area-inset-left, 0px));
+    top: calc(16px + env(safe-area-inset-top, 0px));
+    width: min(360px, calc(100% - 32px));
+    display: grid; gap: 12px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+    backdrop-filter: blur(8px);
+  }
+  .eyebrow { font: 600 10px/1 var(--body); letter-spacing: .14em; text-transform: uppercase; color: var(--accent); }
+  h1 { margin: 0; font: 800 20px/1.15 var(--display); letter-spacing: -.01em; text-wrap: balance; }
+  .lead { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  button {
+    font: 600 12px/1 var(--body); color: var(--fg); cursor: pointer;
+    padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.04);
+  }
+  button:hover { background: rgba(255,255,255,.1); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .primary { background: var(--accent); border-color: var(--accent); color: #062029; }
+  .primary:hover { background: #4ccbda; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; }
+  .chip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .note { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+  .hud[data-collapsed="true"] .collapsible { display: none; }
+  @media (max-width: 520px) { .hud { gap: 10px; padding: 12px; } h1 { font-size: 17px; } }
+  .status { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; }
+  .status div { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+  .status dt { color: var(--muted); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+  .status dd { margin: 3px 0 0; font: 600 13px/1.3 var(--body); }
+  .back { color: var(--accent); font-size: 12.5px; font-weight: 600; }
+</style>
+
+<div id="scene" aria-label="Cena 3D em primeira pessoa: você é a Nicolly diante da barreira sanitária"></div>
+
+<section class="hud" id="hud">
+  <div class="eyebrow">MAIA · Modo interativo</div>
+  <h1>Você é a Nicolly</h1>
+  <p class="lead">Analista Laboratório I. Chegue ao círculo em frente à câmera e tente entrar na área limpa.</p>
+  <dl class="status">
+    <div><dt>Barreira</dt><dd id="state-label">Aguardando colaborador</dd></div>
+    <div><dt>Vestindo</dt><dd id="wearing-label">Camisa (sem jaleco)</dd></div>
+  </dl>
+  <div class="row">
+    <button class="primary" id="enter-vr" type="button" disabled>Verificando VR…</button>
+    <button id="wear" type="button">Vestir jaleco</button>
+    <button id="restart" type="button">Recomeçar</button>
+  </div>
+  <p class="note" id="vr-note">No óculos: analógico esquerdo anda, direito gira, gatilho veste o jaleco perto do cabideiro, botão A ou X recomeça.</p>
+  <a class="back" href="./">← Ver a animação</a>
+</section>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+
+const STATES = {
+  waiting:      { color: "#f4b400", ink: "#3d2a00", title: "Aguardando colaborador" },
+  unidentified: { color: "#e0661f", ink: "#ffffff", title: "Colaborador não identificado" },
+  analyzing:    { color: "#0a3663", ink: "#ffffff", title: "Analisando…" },
+  blocked:      { color: "#c62f25", ink: "#ffffff", title: "Bloqueado · sem EPI" },
+  released:     { color: "#13915f", ink: "#ffffff", title: "Liberado · BPF conforme" },
+};
+
+// ---------- renderizador ----------
+const host = document.getElementById("scene");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(host.clientWidth, host.clientHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType("local-floor");
+host.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#dfe7ec");
+scene.fog = new THREE.Fog("#dfe7ec", 14, 30);
+
+const camera = new THREE.PerspectiveCamera(55, host.clientWidth / host.clientHeight, 0.05, 60);
+// O "dolly" carrega a câmera; no VR o óculos se move dentro dele.
+const dolly = new THREE.Group();
+dolly.add(camera);
+scene.add(dolly);
+camera.position.set(2.5, 2.0, 4.9);
+
+
+scene.add(new THREE.HemisphereLight("#ffffff", "#9aa8b2", 1.6));
+const sun = new THREE.DirectionalLight("#ffffff", 1.4);
+sun.position.set(3, 6, 4);
+scene.add(sun);
+
+// ---------- materiais ----------
+const M = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.75, metalness: 0, ...extra });
+const mat = {
+  floorDirty: M("#c9d3d6", { roughness: 0.55 }),
+  floorClean: M("#bfe0d6", { roughness: 0.5 }),
+  wall: M("#f4f7f8", { roughness: 0.9 }),
+  seam: M("#d6dee2"),
+  steel: M("#b9c4cb", { metalness: 0.65, roughness: 0.32 }),
+  dark: M("#1f2b36", { roughness: 0.5 }),
+  glass: new THREE.MeshStandardMaterial({ color: "#bfe3ee", transparent: true, opacity: 0.28, roughness: 0.1 }),
+  yellow: M("#f2c400"),
+  black: M("#1a1d21"),
+  lamp: new THREE.MeshStandardMaterial({ color: "#ffffff", emissive: "#ffffff", emissiveIntensity: 1 }),
+};
+
+function box(w, h, d, material, x, y, z, parent = scene) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  mesh.position.set(x, y, z);
+  parent.add(mesh);
+  return mesh;
+}
+
+// ---------- texto em textura ----------
+function textPanel(width, height, pxPerMeter = 512) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * pxPerMeter);
+  canvas.height = Math.round(height * pxPerMeter);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(width, height),
+    new THREE.MeshBasicMaterial({ map: texture, toneMapped: false }),
+  );
+  return { canvas, ctx: canvas.getContext("2d"), texture, mesh };
+}
+
+function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+  const words = text.split(" ");
+  let line = "";
+  for (const word of words) {
+    const test = line ? `${line} ${word}` : word;
+    if (ctx.measureText(test).width > maxWidth && line) {
+      ctx.fillText(line, x, y);
+      line = word;
+      y += lineHeight;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, x, y);
+}
+
+// ---------- sala ----------
+const ROOM = { x: 3.2, zBack: -7, zFront: 8, h: 3.2 };
+const floorDirty = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.x * 2, ROOM.zFront), mat.floorDirty);
+floorDirty.rotation.x = -Math.PI / 2;
+floorDirty.position.set(0, 0, ROOM.zFront / 2);
+scene.add(floorDirty);
+const floorClean = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.x * 2, -ROOM.zBack), mat.floorClean);
+floorClean.rotation.x = -Math.PI / 2;
+floorClean.position.set(0, 0, ROOM.zBack / 2);
+scene.add(floorClean);
+
+// paredes laterais com juntas de painel sanduíche
+for (const side of [-1, 1]) {
+  box(0.1, ROOM.h, ROOM.zFront - ROOM.zBack, mat.wall, side * ROOM.x, ROOM.h / 2, (ROOM.zFront + ROOM.zBack) / 2);
+  for (let z = ROOM.zBack + 1.2; z < ROOM.zFront; z += 1.2) {
+    box(0.02, ROOM.h, 0.02, mat.seam, side * (ROOM.x - 0.06), ROOM.h / 2, z);
+  }
+}
+box(ROOM.x * 2, ROOM.h, 0.1, mat.wall, 0, ROOM.h / 2, ROOM.zBack);
+box(ROOM.x * 2, 0.1, ROOM.zFront - ROOM.zBack, mat.wall, 0, ROOM.h, (ROOM.zFront + ROOM.zBack) / 2);
+for (let z = ROOM.zBack + 1.5; z < ROOM.zFront; z += 3) box(0.5, 0.04, 1.4, mat.lamp, 0, ROOM.h - 0.06, z);
+
+// divisória com vidro dos dois lados da passagem
+box(ROOM.x - 0.95, 1.1, 0.06, mat.glass, -(0.95 + (ROOM.x - 0.95) / 2), 0.55, 0);
+box(ROOM.x - 0.95, 1.1, 0.06, mat.glass, 0.95 + (ROOM.x - 0.95) / 2, 0.55, 0);
+box(ROOM.x - 0.95, 0.05, 0.08, mat.steel, -(0.95 + (ROOM.x - 0.95) / 2), 1.12, 0);
+box(ROOM.x - 0.95, 0.05, 0.08, mat.steel, 0.95 + (ROOM.x - 0.95) / 2, 1.12, 0);
+
+// faixas amarelas da baia de espera
+for (const x of [-0.55, 0.55]) box(0.06, 0.005, 1.6, mat.yellow, x, 0.003, 1.3);
+
+// ponto de parada: anel no chão que muda de cor
+const ring = new THREE.Mesh(
+  new THREE.RingGeometry(0.28, 0.36, 48),
+  new THREE.MeshBasicMaterial({ color: STATES.waiting.color, toneMapped: false }),
+);
+ring.rotation.x = -Math.PI / 2;
+ring.position.set(0, 0.006, 1.25);
+scene.add(ring);
+
+// faixa de luz no chão sob a catraca
+const strip = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.1, 0.08),
+  new THREE.MeshBasicMaterial({ color: STATES.waiting.color, toneMapped: false }),
+);
+strip.rotation.x = -Math.PI / 2;
+strip.position.set(0, 0.006, 0.18);
+scene.add(strip);
+
+// ---------- totem com câmera e tela ----------
+const totem = new THREE.Group();
+totem.position.set(-0.78, 0, 0.35);
+scene.add(totem);
+box(0.34, 1.5, 0.26, mat.steel, 0, 0.75, 0, totem);
+box(0.36, 0.06, 0.28, mat.dark, 0, 1.53, 0, totem);
+const cam = box(0.14, 0.08, 0.1, mat.black, 0, 1.64, 0.04, totem);
+const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.02, 24), mat.dark);
+lens.rotation.x = Math.PI / 2;
+lens.position.set(0, 0, 0.055);
+cam.add(lens);
+const camLed = new THREE.Mesh(new THREE.SphereGeometry(0.008, 12, 8), new THREE.MeshBasicMaterial({ color: "#ff3b30" }));
+camLed.position.set(0.045, 0.02, 0.052);
+cam.add(camLed);
+const screenPanel = textPanel(0.3, 0.22, 1400);
+screenPanel.mesh.position.set(0, 1.28, 0.132);
+screenPanel.mesh.rotation.y = 0.25;
+totem.add(screenPanel.mesh);
+
+// ---------- catraca (gabinete + braço) ----------
+const gate = new THREE.Group();
+gate.position.set(0.62, 0, 0);
+scene.add(gate);
+box(0.28, 1.0, 0.7, mat.steel, 0, 0.5, 0, gate);
+box(0.3, 0.04, 0.72, mat.dark, 0, 1.02, 0, gate);
+const gateLight = new THREE.Mesh(
+  new THREE.BoxGeometry(0.02, 0.12, 0.5),
+  new THREE.MeshBasicMaterial({ color: STATES.waiting.color, toneMapped: false }),
+);
+gateLight.position.set(-0.145, 0.85, 0);
+gate.add(gateLight);
+const armPivot = new THREE.Group();
+armPivot.position.set(-0.14, 0.9, 0);
+gate.add(armPivot);
+const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.95, 16), mat.steel);
+arm.rotation.z = Math.PI / 2;
+arm.position.set(-0.475, 0, 0);
+armPivot.add(arm);
+
+// ---------- placas ----------
+const header = box(2.6, 0.08, 0.1, mat.dark, 0, 2.42, 0);
+const board = textPanel(2.4, 0.62, 640);
+board.mesh.position.set(0, 2.1, 0.06);
+scene.add(board.mesh);
+
+const backSign = textPanel(2.6, 0.5, 400);
+backSign.mesh.position.set(0, 2.2, ROOM.zBack + 0.06);
+scene.add(backSign.mesh);
+{
+  const { ctx, canvas, texture } = backSign;
+  ctx.fillStyle = "#0f6a4b"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#ffffff"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = `800 ${canvas.height * 0.36}px Manrope, sans-serif`;
+  ctx.fillText("ÁREA LIMPA · PRODUÇÃO", canvas.width / 2, canvas.height / 2);
+  texture.needsUpdate = true;
+}
+
+const sideSign = textPanel(1.4, 0.7, 400);
+sideSign.mesh.position.set(-ROOM.x + 0.06, 1.7, 3.2);
+sideSign.mesh.rotation.y = Math.PI / 2;
+scene.add(sideSign.mesh);
+
+// pia de pedal e cabideiro de jalecos (lado de fora)
+box(0.55, 0.85, 0.45, mat.steel, -ROOM.x + 0.35, 0.425, 2.2);
+box(0.5, 0.05, 0.4, mat.dark, -ROOM.x + 0.35, 0.86, 2.2);
+const rack = new THREE.Group();
+rack.position.set(2.65, 0, 0.75);
+scene.add(rack);
+const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.8, 12), mat.steel);
+pole.position.y = 0.9;
+rack.add(pole);
+const rackBase = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.03, 24), mat.steel);
+rackBase.position.y = 0.015;
+rack.add(rackBase);
+const hangingCoat = box(0.42, 0.85, 0.12, M("#ffffff"), -0.12, 1.2, 0, rack);
+
+
+// ---------- desenho das telas ----------
+let lastKey = "";
+function drawBoard(stateKey, detail, narration) {
+  const s = STATES[stateKey];
+  {
+    const { ctx, canvas, texture } = board;
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = s.color; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(0,0,0,0.12)"; ctx.fillRect(0, H * 0.7, W, H * 0.3);
+    ctx.fillStyle = s.ink; ctx.textBaseline = "alphabetic"; ctx.textAlign = "left";
+    ctx.font = `600 ${H * 0.085}px "DM Sans", sans-serif`;
+    ctx.globalAlpha = 0.85; ctx.fillText("MAIA · BARREIRA SANITÁRIA", W * 0.03, H * 0.15); ctx.globalAlpha = 1;
+    ctx.font = `800 ${H * 0.22}px Manrope, sans-serif`;
+    ctx.fillText(s.title, W * 0.03, H * 0.4);
+    ctx.font = `600 ${H * 0.11}px "DM Sans", sans-serif`;
+    if (detail) ctx.fillText(detail, W * 0.03, H * 0.58);
+    ctx.fillStyle = stateKey === "waiting" ? "#3d2a00" : "#ffffff";
+    ctx.font = `400 ${H * 0.095}px "DM Sans", sans-serif`;
+    wrapText(ctx, narration, W * 0.03, H * 0.87, W * 0.94, H * 0.11);
+    texture.needsUpdate = true;
+  }
+  {
+    const { ctx, canvas, texture } = screenPanel;
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = "#0d2236"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = s.color; ctx.fillRect(0, 0, W, H * 0.42);
+    ctx.fillStyle = s.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = `800 ${H * 0.13}px Manrope, sans-serif`;
+    wrapText(ctx, s.title, W / 2, H * 0.15, W * 0.9, H * 0.14);
+    ctx.fillStyle = "#eef4f8";
+    ctx.font = `600 ${H * 0.1}px "DM Sans", sans-serif`;
+    wrapText(ctx, detail || "Olhe para a câmera", W / 2, H * 0.62, W * 0.88, H * 0.12);
+    texture.needsUpdate = true;
+  }
+}
+
+function drawSideSign() {
+  const { ctx, canvas, texture } = sideSign;
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = "#0a3663"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#ffffff"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.font = `800 ${H * 0.13}px Manrope, sans-serif`;
+  ctx.fillText("Antes de entrar", W * 0.07, H * 0.22);
+  ctx.font = `400 ${H * 0.085}px "DM Sans", sans-serif`;
+  ["1. Lave e higienize as mãos", "2. Vista os EPIs do seu cargo", "3. Pare no círculo e olhe", "    para a câmera"].forEach((line, i) =>
+    ctx.fillText(line, W * 0.07, H * (0.42 + i * 0.14)));
+  texture.needsUpdate = true;
+}
+
+
+// ---------- modo interativo: a pessoa é a colaboradora ----------
+// Nome e cargo exibidos no crachá e nas telas: troque aqui.
+const NOME = "Nicolly";
+const CARGO = "Analista Laboratório I";
+STATES.done = { color: "#13915f", ink: "#ffffff", title: "Bem-vindo à área limpa" };
+
+const EYE = 1.65;           // altura dos olhos no modo computador
+const START = { x: 0, z: 5.6 };
+const ZONE = { zMin: 0.15, zMax: 2.0, xMax: 0.7 };   // círculo em frente ao totem
+const RACK_REACH = 1.3;     // distância para vestir o jaleco
+const SPEED = 1.5;          // m/s
+const TEXTS = {
+  waiting:   [null, `Você é a ${NOME}. Pare no círculo em frente à câmera.`],
+  analyzing: [`${NOME} · reconhecendo rosto e EPIs`, "Rosto reconhecido (distância 0,31). Consultando os EPIs."],
+  blocked:   [`${NOME} · Falta: Jaleco/avental`, "Catraca travada. Sem o EPI obrigatório não há acesso."],
+  released:  [`${NOME} · Jaleco detectado`, "Pulso enviado à catraca. Pode entrar."],
+  done:      [`${NOME} · acesso liberado`, "Fim da simulação. Aperte A ou X no controle (R no teclado) para recomeçar."],
+};
+
+const player = { coat: false, yaw: 0, pitch: 0 };
+let barrier = "waiting";
+let since = 0;
+let gateOpen = false;
+let everBlocked = false;
+let now = 0;
+
+camera.rotation.order = "YXZ";
+function placeAtStart() {
+  dolly.position.set(START.x, 0, START.z);
+  dolly.rotation.set(0, 0, 0);
+  player.yaw = 0;
+  player.pitch = 0;
+  if (!renderer.xr.isPresenting) camera.position.set(0, EYE, 0);
+}
+placeAtStart();
+
+// ---------- som (bipes simples, sem arquivos) ----------
+let audio = null;
+function unlockAudio() {
+  try { audio = audio || new AudioContext(); audio.resume(); } catch { audio = null; }
+}
+function beep(freq, duration, type = "sine", when = 0) {
+  if (!audio) return;
+  const osc = audio.createOscillator();
+  const gain = audio.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.0001, audio.currentTime + when);
+  gain.gain.exponentialRampToValueAtTime(0.25, audio.currentTime + when + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + when + duration);
+  osc.connect(gain).connect(audio.destination);
+  osc.start(audio.currentTime + when);
+  osc.stop(audio.currentTime + when + duration + 0.05);
+}
+const sounds = {
+  blocked: () => { beep(220, 0.25, "square"); beep(180, 0.35, "square", 0.3); },
+  released: () => { beep(660, 0.15); beep(880, 0.25, "sine", 0.18); },
+  coat: () => beep(520, 0.12),
+};
+
+// ---------- mãos do avatar (mangas mudam quando veste o jaleco) ----------
+const SHIRT = "#2d6fa8", COAT = "#ffffff", SKIN = "#d8a888";
+const sleeves = [];
+function buildHand(isLeft) {
+  const hand = new THREE.Group();
+  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.03, 0.1), M(SKIN));
+  palm.position.set(0, -0.01, 0.02);
+  hand.add(palm);
+  const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.22, 16), M(SHIRT));
+  sleeve.rotation.x = Math.PI / 2;
+  sleeve.position.set(0, -0.01, 0.17);
+  hand.add(sleeve);
+  sleeves.push(sleeve);
+  if (isLeft) {
+    // crachá no pulso: identifica o avatar
+    const tag = textPanel(0.11, 0.05, 2400);
+    const { ctx, canvas, texture } = tag;
+    ctx.fillStyle = "#0a3663"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ffffff"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = `800 ${canvas.height * 0.42}px Manrope, sans-serif`;
+    ctx.fillText(NOME.toUpperCase(), canvas.width / 2, canvas.height * 0.38);
+    ctx.font = `600 ${canvas.height * 0.2}px "DM Sans", sans-serif`;
+    ctx.fillText(CARGO, canvas.width / 2, canvas.height * 0.76);
+    texture.needsUpdate = true;
+    tag.mesh.rotation.x = -Math.PI / 2;
+    tag.mesh.position.set(0, 0.04, 0.16);
+    hand.add(tag.mesh);
+  }
+  return hand;
+}
+function setSleeves(color) { sleeves.forEach((s) => s.material.color.set(color)); }
+
+// ---------- aviso flutuante sobre o cabideiro ----------
+// Em primeira pessoa a placa de estado fica atrás da catraca, de frente para o círculo.
+board.mesh.position.set(0, 2.2, -0.9);
+board.mesh.scale.setScalar(0.75);
+
+const rackPrompt = textPanel(0.62, 0.17, 1300);
+rackPrompt.mesh.position.set(2.65, 1.95, 0.75);
+scene.add(rackPrompt.mesh);
+{
+  const { ctx, canvas, texture } = rackPrompt;
+  ctx.fillStyle = "#0a3663"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#ffffff"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = `800 ${canvas.height * 0.3}px Manrope, sans-serif`;
+  ctx.fillText("Vestir o jaleco", canvas.width / 2, canvas.height * 0.36);
+  ctx.font = `400 ${canvas.height * 0.2}px "DM Sans", sans-serif`;
+  ctx.fillText("Gatilho do controle (ou tecla E)", canvas.width / 2, canvas.height * 0.72);
+  texture.needsUpdate = true;
+}
+rackPrompt.mesh.visible = false;
+hangingCoat.material = hangingCoat.material.clone();
+
+// ---------- posição da cabeça ----------
+const headWorld = new THREE.Vector3();
+const forward = new THREE.Vector3();
+function head() {
+  camera.getWorldPosition(headWorld);
+  return headWorld;
+}
+function nearRack() {
+  const h = head();
+  return Math.hypot(h.x - 2.65, h.z - 0.75) < RACK_REACH;
+}
+
+// Área onde se pode andar: paredes, divisória de vidro e catraca.
+function allowed(x, z) {
+  if (Math.abs(x) > 2.9 || z > 7.6 || z < -6.6) return false;
+  if (z < 0.5 && z > -0.35 && Math.abs(x) > 0.4) return false;   // vidro, totem e gabinete
+  if (z < 0.2 && z > -0.35 && !gateOpen) return false;            // braço da catraca fechado
+  return true;
+}
+function moveBy(dx, dz) {
+  const h = head();
+  const okBefore = allowed(h.x, h.z);
+  if (allowed(h.x + dx, h.z + dz) || !okBefore) { dolly.position.x += dx; dolly.position.z += dz; return; }
+  if (allowed(h.x + dx, h.z)) dolly.position.x += dx;
+  else if (allowed(h.x, h.z + dz)) dolly.position.z += dz;
+}
+
+// ---------- vestir, recomeçar ----------
+function wearCoat() {
+  if (player.coat || !nearRack()) return false;
+  player.coat = true;
+  hangingCoat.visible = false;
+  rackPrompt.mesh.visible = false;
+  setSleeves(COAT);
+  sounds.coat();
+  updateWearing();
+  return true;
+}
+function restart() {
+  player.coat = false;
+  everBlocked = false;
+  hangingCoat.visible = true;
+  setSleeves(SHIRT);
+  setBarrier("waiting");
+  gateOpen = false;
+  placeAtStart();
+  updateWearing();
+}
+function primaryAction() {
+  unlockAudio();
+  if (wearCoat()) return;
+  if (barrier === "done") restart();
+}
+
+// ---------- máquina de estados da barreira ----------
+function setBarrier(next) {
+  if (next === barrier && lastKey) return;
+  barrier = next;
+  since = now;
+  if (next === "blocked") { everBlocked = true; sounds.blocked(); }
+  if (next === "released") sounds.released();
+  const [detail, narration] = TEXTS[next];
+  const key = `${next}|${detail}`;
+  if (key !== lastKey) {
+    lastKey = key;
+    drawBoard(next, detail, narration);
+    const c = new THREE.Color(STATES[next].color);
+    ring.material.color.copy(c);
+    strip.material.color.copy(c);
+    gateLight.material.color.copy(c);
+  }
+  stateLabel.textContent = STATES[next].title;
+}
+function updateBarrier() {
+  const h = head();
+  const inZone = h.z > ZONE.zMin && h.z < ZONE.zMax && Math.abs(h.x) < ZONE.xMax;
+  switch (barrier) {
+    case "waiting":
+      if (inZone) setBarrier("analyzing");
+      break;
+    case "analyzing":
+      if (!inZone) setBarrier("waiting");
+      else if (now - since > 1.6) setBarrier(player.coat ? "released" : "blocked");
+      break;
+    case "blocked":
+      if (!inZone) setBarrier("waiting");
+      break;
+    case "released":
+      gateOpen = true;
+      if (h.z < -1.0) { setBarrier("done"); }
+      else if (h.z > ZONE.zMax + 0.3 && now - since > 2) { gateOpen = false; setBarrier("waiting"); }
+      break;
+    case "done":
+      if (h.z < -0.6) gateOpen = false;
+      break;
+  }
+  // Quem atravessa a catraca fechada andando de verdade é empurrado de volta.
+  if (!gateOpen && h.z < 0.2 && h.z > -0.35 && Math.abs(h.x) < 0.6) {
+    dolly.position.z += 0.25 - h.z;
+  }
+}
+
+// ---------- computador: teclado e mouse ----------
+const keys = new Set();
+window.addEventListener("keydown", (e) => {
+  if (e.target.closest && e.target.closest("button, a, input")) return;
+  keys.add(e.code);
+  if (e.code === "KeyE") primaryAction();
+  if (e.code === "KeyR") restart();
+});
+window.addEventListener("keyup", (e) => keys.delete(e.code));
+let dragging = null;
+renderer.domElement.addEventListener("pointerdown", (e) => { unlockAudio(); dragging = { x: e.clientX, y: e.clientY }; });
+window.addEventListener("pointerup", () => { dragging = null; });
+window.addEventListener("pointermove", (e) => {
+  if (!dragging || renderer.xr.isPresenting) return;
+  player.yaw -= (e.clientX - dragging.x) * 0.004;
+  player.pitch = Math.max(-1.2, Math.min(1.2, player.pitch - (e.clientY - dragging.y) * 0.004));
+  dragging = { x: e.clientX, y: e.clientY };
+});
+function desktopMove(dt) {
+  camera.rotation.set(player.pitch, player.yaw, 0);
+  let f = 0, s = 0;
+  if (keys.has("KeyW") || keys.has("ArrowUp")) f += 1;
+  if (keys.has("KeyS") || keys.has("ArrowDown")) f -= 1;
+  if (keys.has("KeyD")) s += 1;
+  if (keys.has("KeyA")) s -= 1;
+  if (keys.has("ArrowLeft")) player.yaw += dt * 1.8;
+  if (keys.has("ArrowRight")) player.yaw -= dt * 1.8;
+  if (!f && !s) return;
+  const sin = Math.sin(player.yaw), cos = Math.cos(player.yaw);
+  const len = Math.hypot(f, s);
+  moveBy(((-sin * f) + (cos * s)) / len * SPEED * dt, ((-cos * f) - (sin * s)) / len * SPEED * dt);
+}
+
+// ---------- óculos: analógicos e botões ----------
+let snapReady = true;
+const pressed = new Map();
+function vrMove(dt) {
+  const session = renderer.xr.getSession();
+  if (!session) return;
+  for (const source of session.inputSources) {
+    const pad = source.gamepad;
+    if (!pad) continue;
+    const ax = pad.axes[2] ?? 0, ay = pad.axes[3] ?? 0;
+    if (source.handedness === "left" && Math.hypot(ax, ay) > 0.15) {
+      camera.getWorldDirection(forward);
+      forward.y = 0; forward.normalize();
+      const rightX = -forward.z, rightZ = forward.x;
+      moveBy((forward.x * -ay + rightX * ax) * SPEED * dt, (forward.z * -ay + rightZ * ax) * SPEED * dt);
+    }
+    if (source.handedness === "right") {
+      if (Math.abs(ax) > 0.7 && snapReady) {
+        // giro de 30° em torno da cabeça
+        const h = head().clone();
+        const angle = ax > 0 ? -Math.PI / 6 : Math.PI / 6;
+        dolly.rotation.y += angle;
+        const dx = dolly.position.x - h.x, dz = dolly.position.z - h.z;
+        const c = Math.cos(angle), s = Math.sin(angle);
+        dolly.position.x = h.x + dx * c + dz * s;
+        dolly.position.z = h.z - dx * s + dz * c;
+        snapReady = false;
+      } else if (Math.abs(ax) < 0.3) {
+        snapReady = true;
+      }
+    }
+    // botão A (direito) ou X (esquerdo): recomeçar
+    const button = pad.buttons[4];
+    const id = `${source.handedness}-4`;
+    const down = !!button?.pressed;
+    if (down && !pressed.get(id)) restart();
+    pressed.set(id, down);
+  }
+}
+for (const i of [0, 1]) {
+  const controller = renderer.xr.getController(i);
+  controller.addEventListener("select", primaryAction);
+  dolly.add(controller);
+  const grip = renderer.xr.getControllerGrip(i);
+  grip.addEventListener("connected", (event) => {
+    if (!grip.userData.hand) {
+      grip.userData.hand = buildHand(event.data.handedness === "left");
+      grip.add(grip.userData.hand);
+    }
+  });
+  dolly.add(grip);
+}
+setSleeves(SHIRT);
+
+// ---------- painel da página ----------
+const stateLabel = document.getElementById("state-label");
+const wearingLabel = document.getElementById("wearing-label");
+function updateWearing() {
+  wearingLabel.textContent = player.coat ? "Camisa + jaleco/avental" : "Camisa (sem jaleco)";
+}
+document.getElementById("restart").addEventListener("click", () => { unlockAudio(); restart(); });
+document.getElementById("wear").addEventListener("click", () => {
+  unlockAudio();
+  if (!wearCoat()) wearingLabel.textContent = player.coat ? "Já está de jaleco" : "Chegue perto do cabideiro primeiro";
+});
+
+const vrBtn = document.getElementById("enter-vr");
+const vrNote = document.getElementById("vr-note");
+let xrSession = null;
+async function setupVR() {
+  let supported = false;
+  try { supported = !!(await navigator.xr?.isSessionSupported("immersive-vr")); } catch { supported = false; }
+  if (!supported) {
+    vrBtn.textContent = "VR indisponível aqui";
+    vrNote.textContent = "No computador: W A S D para andar, arraste para olhar, E veste o jaleco, R recomeça. No Quest, abra esta página no navegador do óculos.";
+    return;
+  }
+  vrBtn.disabled = false;
+  vrBtn.textContent = "Entrar em VR";
+  vrBtn.addEventListener("click", async () => {
+    unlockAudio();
+    if (xrSession) { xrSession.end(); return; }
+    try {
+      const session = await navigator.xr.requestSession("immersive-vr", { optionalFeatures: ["local-floor"] });
+      xrSession = session;
+      session.addEventListener("end", () => {
+        xrSession = null;
+        vrBtn.textContent = "Entrar em VR";
+        camera.position.set(0, EYE, 0);
+      });
+      await renderer.xr.setSession(session);
+      vrBtn.textContent = "Sair do VR";
+      camera.rotation.set(0, 0, 0);
+      restart();
+    } catch {
+      vrNote.textContent = "O óculos recusou o modo VR. Confira a permissão do navegador e tente de novo.";
+    }
+  });
+}
+setupVR();
+
+// ---------- laço ----------
+const clock = new THREE.Clock();
+let gateAngle = 0;
+let firstFrame = true;
+function frame() {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  now += dt;
+  if (renderer.xr.isPresenting) vrMove(dt);
+  else desktopMove(dt);
+  if (firstFrame) { firstFrame = false; setBarrier("waiting"); updateWearing(); }
+  else updateBarrier();
+
+  const showPrompt = !player.coat && nearRack();
+  rackPrompt.mesh.visible = showPrompt;
+  if (rackPrompt.mesh.visible) rackPrompt.mesh.lookAt(head().x, rackPrompt.mesh.position.y, head().z);
+  const glow = !player.coat && everBlocked ? 0.35 + 0.35 * Math.sin(now * 5) : 0;
+  hangingCoat.material.emissive.setRGB(glow * 0.2, glow * 0.75, glow);
+
+  gateAngle += ((gateOpen ? -Math.PI / 2 : 0) - gateAngle) * Math.min(1, dt * 4);
+  armPivot.rotation.y = gateAngle;
+  camLed.visible = Math.floor(now * 2) % 2 === 0;
+  renderer.render(scene, camera);
+}
+renderer.setAnimationLoop(frame);
+
+function resize() {
+  camera.aspect = host.clientWidth / host.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(host.clientWidth, host.clientHeight);
+}
+window.addEventListener("resize", resize);
+
+drawSideSign();
+document.fonts?.ready.then(() => { lastKey = ""; setBarrier(barrier); drawSideSign(); }).catch(() => {});
+</script>
+
+</body>
+</html>
