@@ -85,6 +85,7 @@
     <button id="restart" type="button">Recomeçar</button>
   </div>
   <p class="note" id="vr-note">No óculos: analógico esquerdo anda, direito gira, gatilho veste o jaleco perto do cabideiro, botão A ou X recomeça.</p>
+  <p class="note" id="pad-note" hidden></p>
   <a class="back" href="./">← Ver a animação</a>
 </section>
 
@@ -378,6 +379,8 @@ const START = { x: 0, z: 5.6 };
 const ZONE = { zMin: 0.15, zMax: 2.0, xMax: 0.7 };   // círculo em frente ao totem
 const RACK_REACH = 1.3;     // distância para vestir o jaleco
 const SPEED = 1.5;          // m/s
+const GIRO_SUAVE = true;    // true = giro contínuo no analógico direito; false = saltos de 30°
+const TURN_SPEED = 1.75;    // rad/s no giro contínuo (cerca de 100° por segundo)
 const AUTO_RESTART = 20;    // s em "área limpa" até recomeçar sozinho
 const NEW_PERSON_AFTER = 3; // s com o óculos fora do rosto = nova pessoa
 const TEXTS = {
@@ -618,8 +621,62 @@ function desktopMove(dt) {
   moveBy(((-sin * f) + (cos * s)) / len * SPEED * dt, ((-cos * f) - (sin * s)) / len * SPEED * dt);
 }
 
+// ---------- computador: controle de videogame (PS4 ou Xbox, API Gamepad) ----------
+// Mapeamento "standard" do Chrome/Edge: botão 0 = ✕, 3 = △, 7 = R2, 9 = Options;
+// eixos 0 e 1 = analógico esquerdo, 2 e 3 = analógico direito.
+const PAD_DEAD = 0.18;
+const padPrev = [];
+const padNote = document.getElementById("pad-note");
+function activePad() {
+  const pads = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) : [];
+  return pads.find((p) => p.mapping === "standard") || pads[0] || null;
+}
+function deadZone(v) { return Math.abs(v) < PAD_DEAD ? 0 : v; }
+function padEdge(pad, i) {
+  const down = !!pad.buttons[i]?.pressed;
+  const was = !!padPrev[i];
+  padPrev[i] = down;
+  return down && !was;
+}
+function padMove(dt) {
+  const pad = activePad();
+  if (!pad) return;
+  const lx = deadZone(pad.axes[0] ?? 0), ly = deadZone(pad.axes[1] ?? 0);
+  const rx = deadZone(pad.axes[2] ?? 0), ry = deadZone(pad.axes[3] ?? 0);
+  player.yaw -= rx * dt * 2.2;
+  player.pitch = Math.max(-1.2, Math.min(1.2, player.pitch - ry * dt * 1.5));
+  camera.rotation.set(player.pitch, player.yaw, 0);
+  if (lx || ly) {
+    let f = -ly, s = lx;
+    const len = Math.hypot(f, s);
+    if (len > 1) { f /= len; s /= len; }
+    const sin = Math.sin(player.yaw), cos = Math.cos(player.yaw);
+    moveBy(((-sin * f) + (cos * s)) * SPEED * dt, ((-cos * f) - (sin * s)) * SPEED * dt);
+  }
+  const cross = padEdge(pad, 0), r2 = padEdge(pad, 7);
+  const triangle = padEdge(pad, 3), options = padEdge(pad, 9);
+  if (cross || r2) primaryAction();
+  if (triangle || options) { unlockAudio(); restart(); }
+}
+window.addEventListener("gamepadconnected", () => {
+  padNote.textContent = "Controle conectado: analógico esquerdo anda, direito olha, ✕ ou R2 veste o jaleco perto do cabideiro, △ recomeça.";
+  padNote.hidden = false;
+});
+window.addEventListener("gamepaddisconnected", () => {
+  if (!activePad()) padNote.hidden = true;
+});
+
 // ---------- óculos: analógicos e botões ----------
 let snapReady = true;
+// Gira o jogador em torno da própria cabeça (não em torno do centro da sala).
+function turnAroundHead(angle) {
+  const h = head().clone();
+  dolly.rotation.y += angle;
+  const dx = dolly.position.x - h.x, dz = dolly.position.z - h.z;
+  const c = Math.cos(angle), s = Math.sin(angle);
+  dolly.position.x = h.x + dx * c + dz * s;
+  dolly.position.z = h.z - dx * s + dz * c;
+}
 const pressed = new Map();
 function vrMove(dt) {
   const session = renderer.xr.getSession();
@@ -635,15 +692,12 @@ function vrMove(dt) {
       moveBy((forward.x * -ay + rightX * ax) * SPEED * dt, (forward.z * -ay + rightZ * ax) * SPEED * dt);
     }
     if (source.handedness === "right") {
-      if (Math.abs(ax) > 0.7 && snapReady) {
-        // giro de 30° em torno da cabeça
-        const h = head().clone();
-        const angle = ax > 0 ? -Math.PI / 6 : Math.PI / 6;
-        dolly.rotation.y += angle;
-        const dx = dolly.position.x - h.x, dz = dolly.position.z - h.z;
-        const c = Math.cos(angle), s = Math.sin(angle);
-        dolly.position.x = h.x + dx * c + dz * s;
-        dolly.position.z = h.z - dx * s + dz * c;
+      if (GIRO_SUAVE) {
+        // giro contínuo, como num jogo: quanto mais inclina, mais rápido
+        if (Math.abs(ax) > 0.15) turnAroundHead(-ax * TURN_SPEED * dt);
+      } else if (Math.abs(ax) > 0.7 && snapReady) {
+        // giro em saltos de 30° (mais confortável para quem enjoa)
+        turnAroundHead(ax > 0 ? -Math.PI / 6 : Math.PI / 6);
         snapReady = false;
       } else if (Math.abs(ax) < 0.3) {
         snapReady = true;
@@ -693,7 +747,7 @@ async function setupVR() {
   try { supported = !!(await navigator.xr?.isSessionSupported("immersive-vr")); } catch { supported = false; }
   if (!supported) {
     vrBtn.textContent = "VR indisponível aqui";
-    vrNote.textContent = "No computador: W A S D para andar, arraste para olhar, E veste o jaleco, R recomeça. No Quest, abra esta página no navegador do óculos.";
+    vrNote.textContent = "No computador: W A S D para andar, arraste para olhar, E veste o jaleco, R recomeça. Com controle de PS4 ou Xbox ligado ao notebook, aperte um botão dele para ativar. No Quest, abra esta página no navegador do óculos.";
     return;
   }
   vrBtn.disabled = false;
@@ -739,7 +793,7 @@ function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
   now += dt;
   if (renderer.xr.isPresenting) vrMove(dt);
-  else desktopMove(dt);
+  else { desktopMove(dt); padMove(dt); }
   if (firstFrame) { firstFrame = false; setBarrier("waiting"); updateWearing(); }
   else updateBarrier();
 
